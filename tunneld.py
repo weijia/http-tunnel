@@ -77,6 +77,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         operation = self._get_operation()
         if operation == "put":
             self.handle_put_request()
+        elif operation == "delete":
+            self.handle_close_req()
         else:
             self.handle_post_request(id)
 
@@ -102,10 +104,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         """Read data from HTTP Request and send to TargetAddress"""
         self.handle_put_request()
 
-    def do_DELETE(self): 
+    def handle_close_req(self):
         self._close_socket()
         self.send_response(200)
         self.end_headers()
+
+    def do_DELETE(self):
+        self.handle_close_req()
 
 def run_server(port, server_class=HTTPServer, handler_class=ProxyRequestHandler): 
     server_address = ('', port)

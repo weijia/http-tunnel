@@ -48,8 +48,8 @@ class Connection():
         except (httplib.HTTPResponse, socket.error) as ex:
             print "Error Sending Data: %s" % ex
 
-    def send_post(self, data):
-        params = urllib.urlencode({"host": target_addr['host'], "port": target_addr['port'], "data": data})
+    def send_data(self, data):
+        params = urllib.urlencode({"data": data})
         headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
         try:
             self.http_conn.request("POST", self._url("/put/" + self.id), params, headers)
@@ -60,7 +60,7 @@ class Connection():
             print "Error Sending Data: %s" % ex
 
     def send(self, data):
-        self.send_post(data)
+        self.send_data(data)
 
     def receive(self):
         try: 
@@ -89,14 +89,17 @@ class SendThread(threading.Thread):
     def __init__(self, socket, conn):
         threading.Thread.__init__(self, name="Send-Thread")
         self.socket = socket
-        self.conn = conn
+        self.http_conn = conn
         self._stop = threading.Event()
 
     def run(self):
         while not self.stopped():
             data = self.socket.recv(BUFFER)
-            print data
-            self.conn.send(data)
+            if data:
+                self.http_conn.send(data)
+            else:
+                self.socket.close()
+                self.http_conn.close()
 
     def stop(self):
         self._stop.set()
