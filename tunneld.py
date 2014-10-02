@@ -12,6 +12,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     def _get_connection_id(self):
         return self.path.split('/')[-1]
 
+    def _get_operation(self):
+        return self.path.split('/')[-2]
+
     def _get_socket(self):
         """get the socket which connects to the target address for this connection"""
         id = self._get_connection_id()
@@ -47,48 +50,57 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         else:
             print 'Connection With ID %s has not been established' % self._get_connection_id()
 
-    def do_POST(self):
-        """POST: Create TCP Connection to the TargetAddress"""
-        id = self._get_connection_id() 
+    def handle_post_request(self, id):
         print 'Initializing connection with ID %s' % id
         length = int(self.headers.getheader('content-length'))
         req_data = self.rfile.read(length)
-        params = cgi.parse_qs(req_data, keep_blank_values=1) 
+        params = cgi.parse_qs(req_data, keep_blank_values=1)
         target_host = params['host'][0]
         target_port = int(params['port'][0])
-
         print 'Connecting to target address: %s % s' % (target_host, target_port)
-        #open socket connection to remote server
+        # open socket connection to remote server
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((target_host, target_port))
         s.settimeout(7)
         print 'Successfully connected'
         #save socket reference
         self.sockets[id] = s
-        try: 
+        try:
             self.send_response(200)
             self.end_headers()
         except socket.error, e:
             print e
 
-    def do_PUT(self):
-        """Read data from HTTP Request and send to TargetAddress"""
+    def do_POST(self):
+        """POST: Create TCP Connection to the TargetAddress"""
+        id = self._get_connection_id()
+        operation = self._get_operation()
+        if operation == "put":
+            self.handle_put_request()
+        else:
+            self.handle_post_request(id)
+
+    def handle_put_request(self):
         id = self._get_connection_id()
         s = self.sockets[id]
         length = int(self.headers.getheader('content-length'))
-        data = cgi.parse_qs(self.rfile.read(length), keep_blank_values=1)['data'][0] 
+        data = cgi.parse_qs(self.rfile.read(length), keep_blank_values=1)['data'][0]
         print 'Writing....'
         print data
-        try: 
+        try:
             s.sendall(data)
             self.send_response(200)
         except socket.timeout:
             print 'Connection Timeout'
             self.send_response(504)
         except socket.error as ex:
-            print 'Error sending data from target socket: %s' % ex  
+            print 'Error sending data from target socket: %s' % ex
             self.send_response(503)
         self.end_headers()
+
+    def do_PUT(self):
+        """Read data from HTTP Request and send to TargetAddress"""
+        self.handle_put_request()
 
     def do_DELETE(self): 
         self._close_socket()

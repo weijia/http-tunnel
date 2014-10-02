@@ -35,18 +35,32 @@ class Connection():
             return True 
         else:
             print 'Fail to establish connection: status %s because %s' % (response.status, response.reason)
-            return False 
+            return False
 
-    def send(self, data):
+    def send_put(self, data):
         params = urllib.urlencode({"data": data})
         headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
-        try: 
+        try:
             self.http_conn.request("PUT", self._url("/" + self.id), params, headers)
             response = self.http_conn.getresponse()
             response.read()
-            print response.status 
+            print response.status
         except (httplib.HTTPResponse, socket.error) as ex:
             print "Error Sending Data: %s" % ex
+
+    def send_post(self, data):
+        params = urllib.urlencode({"host": target_addr['host'], "port": target_addr['port'], "data": data})
+        headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
+        try:
+            self.http_conn.request("POST", self._url("/put/" + self.id), params, headers)
+            response = self.http_conn.getresponse()
+            response.read()
+            print response.status
+        except (httplib.HTTPResponse, socket.error) as ex:
+            print "Error Sending Data: %s" % ex
+
+    def send(self, data):
+        self.send_post(data)
 
     def receive(self):
         try: 
