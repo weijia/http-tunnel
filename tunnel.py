@@ -5,11 +5,13 @@ from uuid import uuid4
 import threading
 import argparse
 import sys
+import logging
 
 BUFFER = 1024 * 50
 
 #set global timeout
 socket.setdefaulttimeout(30)
+
 
 class Connection():
     
@@ -74,11 +76,28 @@ class Connection():
                 return ""
         except (httplib.HTTPResponse, socket.error) as ex:
             print "Error Receiving Data: %s" % ex
-            return "" 
+            return ""
 
-    def close(self):
+    def send_delete_req(self):
         self.http_conn.request("DELETE", "/" + self.id)
         self.http_conn.getresponse()
+
+    def send_close_req(self):
+        try:
+            self.http_conn.request("GET", "/delete/" + self.id)
+            response = self.http_conn.getresponse()
+            data = response.read()
+            if response.status == 200:
+                return data
+            else:
+                print "GET HTTP Status: %d" % response.status
+                return ""
+        except (httplib.HTTPResponse, socket.error) as ex:
+            print "Error Receiving Data: %s" % ex
+            return ""
+
+    def close(self):
+        self.send_close_req()
 
 class SendThread(threading.Thread):
 
@@ -92,20 +111,30 @@ class SendThread(threading.Thread):
         self.http_conn = conn
         self._stop = threading.Event()
 
+    def clean_up_all(self):
+        logging.warn("closing all sockets")
+        self.socket.close()
+        self.http_conn.close()
+        self.stop()
+
     def run(self):
         while not self.stopped():
-            data = self.socket.recv(BUFFER)
+            try:
+                data = self.socket.recv(BUFFER)
+            except:
+                self.clean_up_all()
             if data:
                 self.http_conn.send(data)
             else:
-                self.socket.close()
-                self.http_conn.close()
+                self.clean_up_all()
+
 
     def stop(self):
         self._stop.set()
 
     def stopped(self):
         return self._stop.isSet()
+
 
 class ReceiveThread(threading.Thread):
 
@@ -116,14 +145,18 @@ class ReceiveThread(threading.Thread):
     def __init__(self, socket, conn):
         threading.Thread.__init__(self, name="Receive-Thread")
         self.socket = socket
-        self.conn = conn
+        self.http_conn = conn
         self._stop = threading.Event()
 
     def run(self):
         while not self.stopped():
-            data = self.conn.receive()
-            print data
-            self.socket.sendall(data)
+            data = self.http_conn.receive()
+            logging.debug(data)
+            try:
+                self.socket.sendall(data)
+            except:
+                #Do not need to send http request here, we'll do it in sender.
+                self.socket.close()
 
     def stop(self):
         self._stop.set()

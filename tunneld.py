@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer 
+from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
+import logging
 import socket
 import cgi
 import argparse
@@ -26,15 +27,15 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         s = self.sockets[id]
         if s:
             s.close()
+            del self.sockets[id]
 
-    def do_GET(self):
-        """GET: Read data from TargetAddress and return to client through http response"""
-        s = self._get_socket()
+    def handle_get_req(self, id):
+        s = self.sockets.get(id, None)
         if s:
             print 'GET data'
             try:
                 data = s.recv(self.BUFFER)
-                print data
+                logging.debug(data)
                 self.send_response(200)
                 self.end_headers()
                 if data:
@@ -44,11 +45,20 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 self.send_response(504)
                 self.end_headers()
             except socket.error as ex:
-                print 'Error getting data from target socket: %s' % ex  
+                print 'Error getting data from target socket: %s' % ex
                 self.send_response(503)
                 self.end_headers()
         else:
             print 'Connection With ID %s has not been established' % self._get_connection_id()
+
+    def do_GET(self):
+        """GET: Read data from TargetAddress and return to client through http response"""
+        id = self._get_connection_id()
+        operation = self._get_operation()
+        if operation == "delete":
+            self.handle_close_req()
+        else:
+            self.handle_get_req(id)
 
     def handle_post_request(self, id):
         print 'Initializing connection with ID %s' % id
@@ -77,8 +87,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         operation = self._get_operation()
         if operation == "put":
             self.handle_put_request()
-        elif operation == "delete":
-            self.handle_close_req()
         else:
             self.handle_post_request(id)
 
@@ -88,7 +96,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         length = int(self.headers.getheader('content-length'))
         data = cgi.parse_qs(self.rfile.read(length), keep_blank_values=1)['data'][0]
         print 'Writing....'
-        print data
+        logging.debug(data)
         try:
             s.sendall(data)
             self.send_response(200)
