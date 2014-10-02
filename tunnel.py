@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import socket
 import httplib, urllib
+import traceback
 from uuid import uuid4
 import threading
 import argparse
@@ -10,7 +11,7 @@ import logging
 BUFFER = 1024 * 50
 
 #set global timeout
-socket.setdefaulttimeout(30)
+socket.setdefaulttimeout(10)
 
 
 class Connection():
@@ -99,6 +100,7 @@ class Connection():
     def close(self):
         self.send_close_req()
 
+
 class SendThread(threading.Thread):
 
     """
@@ -108,26 +110,38 @@ class SendThread(threading.Thread):
     def __init__(self, socket, conn):
         threading.Thread.__init__(self, name="Send-Thread")
         self.socket = socket
-        self.http_conn = conn
+        self.http_tunnel = conn
         self._stop = threading.Event()
 
     def clean_up_all(self):
         logging.warn("closing all sockets")
         self.socket.close()
-        self.http_conn.close()
+        self.http_tunnel.close()
         self.stop()
 
     def run(self):
         while not self.stopped():
+
+            timeout = False
             try:
                 data = self.socket.recv(BUFFER)
-            except:
-                self.clean_up_all()
+            except Exception, e:
+                if e.message != "timed out":
+                    traceback.print_exc()
+                    self.clean_up_all()
+                else:
+                    timeout = True
             if data:
-                self.http_conn.send(data)
-            else:
+                logging.warn("Receive OK")
+                self.http_tunnel.send(data)
+            elif not timeout:
                 self.clean_up_all()
-
+            """
+            data = self.socket.recv(BUFFER)
+            logging.warn("socket receive OK")
+            if data:
+                self.http_tunnel.send(data)
+            """
 
     def stop(self):
         self._stop.set()
@@ -156,7 +170,9 @@ class ReceiveThread(threading.Thread):
                 self.socket.sendall(data)
             except:
                 #Do not need to send http request here, we'll do it in sender.
+                traceback.print_exc()
                 self.socket.close()
+            logging.warn("socket send ok")
 
     def stop(self):
         self._stop.set()
@@ -207,7 +223,8 @@ def start_tunnel(listen_port, remote_addr, target_addr, proxy_addr):
     workers = []
     try:
         while True:
-            c_sock, addr = listen_sock.accept() 
+            c_sock, addr = listen_sock.accept()
+            c_sock.settimeout(None)
             print "connected by ", addr
             worker = ClientWorker(c_sock, remote_addr, target_addr, proxy_addr)
             workers.append(worker)
