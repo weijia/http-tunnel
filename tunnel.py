@@ -11,22 +11,22 @@ import logging
 BUFFER = 1024 * 50
 
 #set global timeout
-socket.setdefaulttimeout(10)
+#socket.setdefaulttimeout(10)
 
 
 class Connection():
     
-    def __init__(self, connection_id, remote_addr, proxy_addr):
+    def __init__(self, connection_id, tunnel_server, proxy_addr):
         self.id = connection_id
-        conn_dest = proxy_addr if proxy_addr else remote_addr
+        conn_dest = proxy_addr if proxy_addr else tunnel_server
         self.http_conn = httplib.HTTPConnection(conn_dest['host'], conn_dest['port'])
-        self.remote_addr = remote_addr
+        self.tunnel_server = tunnel_server
 
     def _url(self, url):
-        return "http://{host}:{port}{url}".format(host=self.remote_addr['host'], port=self.remote_addr['port'], url=url)
+        return "http://{host}:{port}{url}".format(host=self.tunnel_server['host'], port=self.tunnel_server['port'], url=url)
 
-    def create(self, target_addr):
-        params = urllib.urlencode({"host": target_addr['host'], "port": target_addr['port']})
+    def create(self, target_address):
+        params = urllib.urlencode({"host": target_address['host'], "port": target_address['port']})
         headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
 
         self.http_conn.request("POST", self._url("/" + self.id), params, headers)
@@ -101,77 +101,49 @@ class Connection():
         self.send_close_req()
 
 
-class SendThread(threading.Thread):
+class SendToTunnelThread(object):
 
     """
     Thread to send data to remote host
     """
-    
-    def __init__(self, socket, conn):
-        threading.Thread.__init__(self, name="Send-Thread")
-        self.socket = socket
+    def __init__(self, conn):
         self.http_tunnel = conn
-        self._stop = threading.Event()
 
     def clean_up_all(self):
         logging.warn("closing all sockets")
-        self.socket.close()
         self.http_tunnel.close()
-        self.stop()
 
-    def run(self):
-        while not self.stopped():
-
-            timeout = False
-            try:
-                data = self.socket.recv(BUFFER)
-            except Exception, e:
-                if e.message != "timed out":
-                    traceback.print_exc()
-                    self.clean_up_all()
-                else:
-                    timeout = True
-            if data:
-                logging.warn("Receive OK")
-                self.http_tunnel.send(data)
-            elif not timeout:
-                self.clean_up_all()
-            """
-            data = self.socket.recv(BUFFER)
-            logging.warn("socket receive OK")
-            if data:
-                self.http_tunnel.send(data)
-            """
-
-    def stop(self):
-        self._stop.set()
-
-    def stopped(self):
-        return self._stop.isSet()
+    def send_to_tunnel(self, data):
+        if data:
+            logging.warn("Receive OK")
+            self.http_tunnel.send(data)
 
 
-class ReceiveThread(threading.Thread):
+class ReceiveFromTunnelThread(threading.Thread):
 
     """
     Thread to receive data from remote host
     """
 
-    def __init__(self, socket, conn):
+    def __init__(self, server_sock, src_address, conn):
         threading.Thread.__init__(self, name="Receive-Thread")
-        self.socket = socket
+        self.server_sock = server_sock
+        self.src_address = src_address
         self.http_conn = conn
         self._stop = threading.Event()
 
     def run(self):
         while not self.stopped():
             data = self.http_conn.receive()
+            if len(data) == 0:
+                continue
             logging.debug(data)
             try:
-                self.socket.sendall(data)
+                self.server_sock.sendto(data, self.src_address)
+                print "sending data:", len(data)
             except:
                 #Do not need to send http request here, we'll do it in sender.
                 traceback.print_exc()
-                self.socket.close()
             logging.warn("socket send ok")
 
     def stop(self):
@@ -180,57 +152,60 @@ class ReceiveThread(threading.Thread):
     def stopped(self):
         return self._stop.isSet()
 
+
 class ClientWorker(threading.Thread):
-
-    def __init__(self, socket, remote_addr, target_addr, proxy_addr):
+    def __init__(self, server_sock, src_address, tunnel_server, target_address, proxy_address):
         threading.Thread.__init__(self)
-        self.socket = socket
-        self.remote_addr = remote_addr 
-        self.target_addr = target_addr
-        self.proxy_addr = proxy_addr
-
-    def run(self):
+        self.server_sock = server_sock
+        self.src_address = src_address
+        self.tunnel_server = tunnel_server
+        self.target_address = target_address
+        self.proxy_address = proxy_address
+        self.connection = None
+        self.sender = None
+        self.receiver = None
         #generate unique connection ID
         connection_id = str(uuid4())
         #main connection for create and close
-        self.connection = Connection(connection_id, self.remote_addr, self.proxy_addr)
+        self.connection = Connection(connection_id, self.tunnel_server, self.proxy_address)
 
-        if self.connection.create(self.target_addr):
-            self.sender = SendThread(self.socket, Connection(connection_id, self.remote_addr, self.proxy_addr))
-            self.receiver = ReceiveThread(self.socket, Connection(connection_id, self.remote_addr, self.proxy_addr))
-            self.sender.start()
+        if self.connection.create(self.target_address):
+            self.sender = SendToTunnelThread(Connection(connection_id, self.tunnel_server, self.proxy_address))
+            self.receiver = ReceiveFromTunnelThread(self.server_sock, self.src_address,
+                                                    Connection(connection_id, self.tunnel_server, self.proxy_address))
             self.receiver.start()
+
+    def send_to_tunnel(self, data):
+        self.sender.send_to_tunnel(data)
 
     def stop(self):
         #stop read and send threads
-        self.sender.stop()
         self.receiver.stop()
         #send close signal to remote server
         self.connection.close()
         #wait for read and send threads to stop and close local socket
-        self.sender.join()
         self.receiver.join()
-        self.socket.close()
 
 
-def start_tunnel(listen_port, remote_addr, target_addr, proxy_addr):
+def start_tunnel(listen_port, tunnel_server, target_addr, proxy_addr):
     """Start tunnel"""
-    listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listen_sock.settimeout(None)
-    listen_sock.bind(('', int(listen_port)))
-    listen_sock.listen(1)
-    print "waiting for connection"
-    workers = []
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server_sock.bind(('', int(listen_port)))
+    receive_from_tunnel_thread = None
+    print "waiting for udp package"
+    workers = {}
     try:
         while True:
-            c_sock, addr = listen_sock.accept()
-            c_sock.settimeout(None)
-            print "connected by ", addr
-            worker = ClientWorker(c_sock, remote_addr, target_addr, proxy_addr)
-            workers.append(worker)
-            worker.start()
+            data, src_address = server_sock.recvfrom(BUFFER)
+            print "received packet from: ", src_address, len(data)
+            if src_address in workers:
+                worker = workers[src_address]
+            else:
+                worker = ClientWorker(server_sock, src_address, remote_addr, target_addr, proxy_addr)
+                workers[src_address] = worker
+            worker.send_to_tunnel(data)
     except (KeyboardInterrupt, SystemExit):
-        listen_sock.close()
+        server_sock.close()
         for w in workers:
             w.stop()
         for w in workers:
@@ -241,10 +216,15 @@ if __name__ == "__main__":
     """Parse argument from command line and start tunnel"""
 
     parser = argparse.ArgumentParser(description='Start Tunnel')
-    parser.add_argument('-p', default=8889, dest='listen_port', help='Port the tunnel listens to, (default to 8889)', type=int)
-    parser.add_argument('target', metavar='Target Address', help='Specify the host and port of the target address in format Host:Port')
-    parser.add_argument('-r', default='localhost:9999', dest='remote', help='Specify the host and port of the remote server to tunnel to (Default to localhost:9999)')
-    parser.add_argument('-o', default='', dest='proxy', help='Specify the host and port of the proxy server(host:port)')
+    parser.add_argument('-p', default=8890, dest='listen_port',
+                        help='Port the tunnel listens to, (default to 8890)', type=int)
+    parser.add_argument('target', metavar='Target Address',
+                        help='Specify the host and port of the target address in format Host:Port')
+    parser.add_argument('-r', default='localhost:19999', dest='remote',
+                        help='Specify the host and port of the remote server to tunnel to '
+                             'This specify the tunnel server(Default to localhost:9999)')
+    parser.add_argument('-o', default='', dest='proxy',
+                        help='Specify the host and port of the proxy server(host:port)')
 
     args = parser.parse_args()
 
@@ -252,70 +232,3 @@ if __name__ == "__main__":
     remote_addr = {"host": args.remote.split(":")[0], "port": args.remote.split(":")[1]}
     proxy_addr = {"host": args.proxy.split(":")[0], "port": args.proxy.split(":")[1]} if (args.proxy) else {}
     start_tunnel(args.listen_port, remote_addr, target_addr, proxy_addr)
-
-
-
-            
-#"""Local port the program will listen to 
-#"""
-#HOST = ''
-#PORT = 50065
-
-#"""Remote address to http tunnel to
-#"""
-#remote_url = 'localhost'
-#remote_port = 8888
-
-#"""Target Address
-#"""
-#target_url = 'chat.freenode.net'
-#target_port = 8001
-
-##generate unique connection ID
-#c_id = uuid4()
-#print 'creating tunnel connection with id %s' % str(c_id)
-#http_conn = httplib.HTTPConnection(remote_url, remote_port)
-##send request for tunneling
-#params = urllib.urlencode({"host": target_url, "port": target_port})
-#headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"}
-#http_conn.request("POST", "/" + str(c_id), params, headers)
-#response = http_conn.getresponse()
-#print 'Created connection with status %d ' % response.status
-
-##listen for connection
-#s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-#s.bind((HOST, PORT))
-#s.listen(1)
-#conn, addr = s.accept()
-#print 'Connected by', addr
-
-##create a loop to read and write data
-#MAX_BUFFER = 1024 * 640
-#while True: 
-    ##read data from socket and tunnel to target add. through http connection
-    #write_data = conn.recv(MAX_BUFFER) 
-    #print write_data
-    #if not write_data:
-        #time.sleep(2)  
-        #print 'Waiting for coming traffic'
-        #continue
-    #params = urllib.urlencode({"data": write_data})
-    #try:
-        #http_conn.request("PUT", "/" + str(c_id), params, headers)  
-        #write_res = http_conn.getresponse()
-        #print write_res.status 
-    #except httplib.HTTPException, e:
-        #print 'HTTPException - %s' % e.reason
-        ##close remote connection
-        #http_conn.request("DELETE", "/" + str(c_id))
-        #http_conn.getresponse()
-
-    ##Retrieve data from HTTP connection and write to the listen socket 
-    #http_conn.request("GET", "/" + str(c_id))
-    #read_res = http_conn.getresponse()
-    #if read_res.status != 200:
-        #break
-    #read_data = read_res.read()
-    #conn.sendall(read_data)
-     
-    

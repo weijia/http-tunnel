@@ -1,13 +1,17 @@
 #!/usr/bin/env python
-from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
+from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 import logging
 import socket
 import cgi
 import argparse
 
+socket.setdefaulttimeout(10)
+
+
 class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     sockets = {}
+    target_addresses = {}
     BUFFER = 1024 * 50 
 
     def _get_connection_id(self):
@@ -34,7 +38,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if s:
             print 'GET data'
             try:
-                data = s.recv(self.BUFFER)
+                data, address = s.recvfrom(self.BUFFER)
+                print "data received:", len(data)#, data
                 logging.debug(data)
                 self.send_response(200)
                 self.end_headers()
@@ -67,12 +72,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         params = cgi.parse_qs(req_data, keep_blank_values=1)
         target_host = params['host'][0]
         target_port = int(params['port'][0])
+        self.target_addresses[id] = (target_host, target_port)
         print 'Connecting to target address: %s % s' % (target_host, target_port)
         # open socket connection to remote server
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect((target_host, target_port))
-        s.settimeout(7)
-        print 'Successfully connected'
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        #s.connect((target_host, target_port))
+        #s.settimeout(7)
+        print 'Successfully created'
         #save socket reference
         self.sockets[id] = s
         try:
@@ -95,10 +101,11 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         s = self.sockets[id]
         length = int(self.headers.getheader('content-length'))
         data = cgi.parse_qs(self.rfile.read(length), keep_blank_values=1)['data'][0]
-        print 'Writing....'
+        print 'Writing....', len(data)#, data
         logging.debug(data)
         try:
-            s.sendall(data)
+            #s.sendall(data)
+            s.sendto(data, self.target_addresses[id])
             self.send_response(200)
         except socket.timeout:
             print 'Connection Timeout'
@@ -120,6 +127,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self.handle_close_req()
 
+
 def run_server(port, server_class=HTTPServer, handler_class=ProxyRequestHandler): 
     server_address = ('', port)
     httpd = server_class(server_address, handler_class)
@@ -128,6 +136,6 @@ def run_server(port, server_class=HTTPServer, handler_class=ProxyRequestHandler)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start Tunnel Server")
-    parser.add_argument("-p", default=9999, dest='port', help='Specify port number server will listen to', type=int)
+    parser.add_argument("-p", default=19999, dest='port', help='Specify port number server will listen to', type=int)
     args = parser.parse_args()
     run_server(args.port)
